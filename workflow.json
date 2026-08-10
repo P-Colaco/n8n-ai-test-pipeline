@@ -1,0 +1,585 @@
+{
+  "name": "Automação completa",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "list",
+          "cachedResultName": "Teste automação",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Página1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit#gid=0"
+        },
+        "options": {}
+      },
+      "id": "9583c21f-afc7-4aee-8dad-708276dcc7de",
+      "name": "Monitor QA Spreadsheet",
+      "type": "n8n-nodes-base.googleSheetsTrigger",
+      "typeVersion": 1,
+      "position": [
+        -736,
+        -464
+      ],
+      "credentials": {
+        "googleSheetsTriggerOAuth2Api": {
+          "id": "zVhnA77CoYCai71r",
+          "name": "Google Sheets Trigger account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pega os dados da linha que disparou o trigger\nconst row = $input.first().json;\n\n// Mapeamento exato das suas colunas\nconst idRoteiro     = row['ID do roteiro']                    || '';\nconst nomeCenario   = row['Nome do cenário']                  || '';\nconst urlTela       = row['URL da tela']                      || '';\nconst urlLogin      = row['URL de Login']                     || ''; // coluna nova sugerida\nconst dadosTeste    = row['Dados de teste']                   || '';\nconst passosManuais = row['Passos manuais']                   || '';\nconst resultadoEsperado = row['Resultado esperado']           || '';\nconst observacoesQA = row['Observações do QA']                || '';\n\n// Validação — só processa se o trigger estiver TRUE\nconst pronto = row['Roteiro pronto para automação'];\nif (String(pronto).toUpperCase() !== 'TRUE') {\n  return [{ json: { skip: true, motivo: 'Roteiro não marcado como pronto' } }];\n}\n\n// Gera nome do arquivo fs-friendly a partir do ID + nome do cenário\nconst fileSlug = `${idRoteiro}-${nomeCenario}`\n  .toLowerCase()\n  .normalize('NFD')\n  .replace(/[\\u0300-\\u036f]/g, '')  // remove acentos\n  .replace(/\\s+/g, '-')             // espaços viram hífens\n  .replace(/[^a-z0-9-]/g, '')       // remove caracteres especiais\n  .replace(/-+/g, '-');             // hífens duplos viram um só\n\n// Monta o markdown no formato exato que o Playwright Generator espera\nconst testPlan = `# ${nomeCenario}\n\n## Contexto\n\n- **ID do Roteiro:** ${idRoteiro}\n- **URL de Login:** ${urlLogin || 'N/A'}\n- **URL da Tela:** ${urlTela}\n\n## Dados de Teste\n\n${dadosTeste}\n\n## Test Scenarios\n\n### 1. ${nomeCenario}\n\n**Seed:** \\`tests/seed.spec.ts\\`\n\n#### 1.1 ${nomeCenario}\n\n**Steps:**\n${passosManuais\n  .split('\\n')\n  .filter(p => p.trim() !== '')\n  .map((p, i) => `${i + 1}. ${p.trim()}`)\n  .join('\\n')}\n\n**Expected Results:**\n${resultadoEsperado\n  .split('\\n')\n  .filter(r => r.trim() !== '')\n  .map(r => `- ${r.trim()}`)\n  .join('\\n')}\n\n${observacoesQA ? `## Observações do QA\\n${observacoesQA}` : ''}\n`;\n\nreturn [{\n  json: {\n    idRoteiro,\n    nomeCenario,\n    urlTela,\n    urlLogin,\n    dadosTeste,\n    testPlan,\n    fileName: `${fileSlug}.md`,          // para salvar em specs/\n    fileNameSpec: `${fileSlug}.spec.ts`,  // para salvar em tests/ depois\n    fileSlug\n  }\n}];"
+      },
+      "id": "ccaec946-ec7e-40ea-af41-1edba4848c65",
+      "name": "Build Playwright Generator Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -320,
+        -464
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Generate a Playwright test for this plan:\n\n<test-suite>{{ $json.nomeCenario }}</test-suite>\n<test-name>{{ $json.nomeCenario }}</test-name>\n<test-file>{{ $json.fileNameSpec }}</test-file>\n<seed-file>tests/seed.spec.ts</seed-file>\n<body>\n{{ $json.testPlan }}\n</body>",
+        "options": {
+          "systemMessage": "You are a Playwright Test Generator, an expert in browser automation \nand end-to-end testing. Your specialty is creating robust, reliable \nPlaywright tests that accurately simulate user interactions and \nvalidate application behavior.\n\n## Snapshot policy\n- Call browser_snapshot ONLY when you need a selector you don't have yet.\n- Never call browser_snapshot after a successful action.\n- Never call browser_snapshot more than once per step.\n- If a selector fails twice, move on and mark the step as FAILED in \n  the test comment. Do not retry more than twice.\n\n## Interaction rules\n- Avoid browser_wait_for unless the test plan explicitly requires it.\n- Prefer browser_verify_text_visible or browser_verify_element_visible \n  for validations after navigation or clicks.\n- The target parameter in browser_click, browser_type, and \n  browser_hover must always be a valid CSS selector or semantic \n  Playwright selector — never a natural language description.\n\n## Selector priority\n1. getByRole\n2. getByLabel  \n3. getByText\n4. getByPlaceholder\n5. CSS selector with data-test or data-testid attribute\n6. CSS selector (last resort)\n\n## Error policy\n- If a step fails after 2 attempts, write the test step with a \n  comment // FAILED: could not resolve selector and continue.\n- Never loop indefinitely trying to recover from an error.\n- Do not call browser_snapshot to diagnose an error you already \n  tried to fix once.\n\n## Test generation flow\n1. Receive the test plan.\n2. Call generator_setup_page once to set up the scenario.\n3. For each step: execute with Playwright tools, using step \n   description as intent.\n4. Call generator_read_log ONCE at the end, after all steps are done.\n5. Immediately call generator_write_test with the complete test file.\n6. Do not call generator_read_log mid-execution.\n\n## Output rules\n- One test file per scenario.\n- fileName must start with tests/ and end with .spec.ts\n  Example: tests/login-valido.spec.ts\n- Wrap test in a describe block matching the top-level test plan name.\n- Test title must match the scenario name.\n- Add a comment with the step text before each step execution.\n- Apply best practices from the generator log when writing the test.",
+          "maxIterations": 30
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        80,
+        -448
+      ],
+      "id": "11cc6162-6acf-458e-aec9-174c9efa44bd",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "claude-sonnet-4-6",
+          "mode": "list",
+          "cachedResultName": "Claude Sonnet 4.6"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.5,
+      "position": [
+        -112,
+        -160
+      ],
+      "id": "facc8374-f43c-4d83-9993-df3fdfc83c2a",
+      "name": "Anthropic Chat Model",
+      "credentials": {
+        "anthropicApi": {
+          "id": "2a8nilaB1vN0JcJg",
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toolDescription": "generator_setup_page",
+        "method": "POST",
+        "url": "http://host.docker.internal:3456/tool/generator_setup_page",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"plan\": {{ JSON.stringify($fromAI('plan', 'Full test plan in markdown/text format')) }}\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        -240,
+        384
+      ],
+      "id": "e3058b16-2975-4797-9f75-6fd53cc147ff",
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "toolDescription": "browser_navigate",
+        "method": "POST",
+        "url": "http://host.docker.internal:3456/tool/browser_navigate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"url\": {{ JSON.stringify($fromAI('url', 'URL to navigate to')) }},\n  \"intent\": {{ JSON.stringify($fromAI('intent', 'Reason for navigating to this URL')) }}\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        -112,
+        384
+      ],
+      "id": "d3118ba1-bb9a-475b-8aeb-ea15d51bf481",
+      "name": "HTTP Request1"
+    },
+    {
+      "parameters": {
+        "toolDescription": "browser_snapshot",
+        "method": "POST",
+        "url": "http://host.docker.internal:3456/tool/browser_snapshot",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        32,
+        384
+      ],
+      "id": "af8a9e7f-120b-4f9e-b87c-ba54df933c47",
+      "name": "HTTP Request2"
+    },
+    {
+      "parameters": {
+        "toolDescription": "browser_click",
+        "method": "POST",
+        "url": "http://host.docker.internal:3456/tool/browser_click",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"target\": {{ JSON.stringify($fromAI('target', 'CSS selector for the element')) }},\n  \"intent\": {{ JSON.stringify($fromAI('intent', 'Reason for clicking this element')) }}\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        176,
+        384
+      ],
+      "id": "bbc860be-d9d3-408c-82a8-2121dd584d53",
+      "name": "HTTP Request3"
+    },
+    {
+      "parameters": {
+        "toolDescription": "browser_type",
+        "method": "POST",
+        "url": "http://host.docker.internal:3456/tool/browser_type",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"target\": {{ JSON.stringify($fromAI('target', 'CSS selector for the input field')) }},\n  \"text\": {{ JSON.stringify($fromAI('text', 'Text to type into the field')) }},\n  \"intent\": {{ JSON.stringify($fromAI('intent', 'Reason for typing')) }}\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        320,
+        384
+      ],
+      "id": "c059a5c3-ebd0-4e7e-bec2-9a6495719f7c",
+      "name": "HTTP Request4"
+    },
+    {
+      "parameters": {
+        "toolDescription": "browser_hover",
+        "method": "POST",
+        "url": "http://host.docker.internal:3456/tool/browser_hover",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"target\": {{ JSON.stringify($fromAI('target', 'CSS selector for the element to hover')) }},\n  \"intent\": {{ JSON.stringify($fromAI('intent', 'Reason for hovering this element')) }}\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        464,
+        384
+      ],
+      "id": "a9734440-892b-4fb9-8a6f-dc7c9aa38676",
+      "name": "HTTP Request5"
+    },
+    {
+      "parameters": {
+        "toolDescription": "browser_press_key",
+        "method": "POST",
+        "url": "http://host.docker.internal:3456/tool/browser_press_key",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"key\": {{ JSON.stringify($fromAI('key', 'Keyboard key to press')) }},\n  \"intent\": {{ JSON.stringify($fromAI('intent', 'Reason for pressing this key')) }}\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        608,
+        384
+      ],
+      "id": "5bb2f856-76df-4b64-b0de-0498d0178556",
+      "name": "HTTP Request6"
+    },
+    {
+      "parameters": {
+        "toolDescription": "browser_wait_for",
+        "method": "POST",
+        "url": "http://host.docker.internal:3456/tool/browser_wait_for",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": {{ JSON.stringify($fromAI('text', 'Text to wait for on the page')) }},\n  \"intent\": {{ JSON.stringify($fromAI('intent', 'Reason for waiting')) }}\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        752,
+        384
+      ],
+      "id": "ab8e4eea-3a26-45af-8b1d-ad5453ab1dd8",
+      "name": "HTTP Request7"
+    },
+    {
+      "parameters": {
+        "toolDescription": "browser_verify_element_visible",
+        "method": "POST",
+        "url": "http://host.docker.internal:3456/tool/browser_verify_element_visible",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"target\": {{ JSON.stringify($fromAI('target', 'CSS selector for the element expected to be visible')) }},\n  \"intent\": {{ JSON.stringify($fromAI('intent', 'Reason for verifying this element')) }}\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        896,
+        384
+      ],
+      "id": "482458e0-2bfa-4b7e-8243-a0b94b8b3280",
+      "name": "HTTP Request8"
+    },
+    {
+      "parameters": {
+        "toolDescription": "browser_verify_text_visible",
+        "method": "POST",
+        "url": "http://host.docker.internal:3456/tool/browser_verify_text_visible",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": {{ JSON.stringify($fromAI('text', 'Text expected to be visible')) }},\n  \"intent\": {{ JSON.stringify($fromAI('intent', 'Reason for verifying this text')) }}\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        1040,
+        384
+      ],
+      "id": "fae0e408-442f-4425-a226-4ef48468c273",
+      "name": "HTTP Request9"
+    },
+    {
+      "parameters": {
+        "toolDescription": "browser_verify_value",
+        "method": "POST",
+        "url": "http://host.docker.internal:3456/tool/browser_verify_value",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"target\": {{ JSON.stringify($fromAI('target', 'CSS selector for the field')) }},\n  \"value\": {{ JSON.stringify($fromAI('value', 'Expected value')) }},\n  \"intent\": {{ JSON.stringify($fromAI('intent', 'Reason for verifying this value')) }}\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        1184,
+        384
+      ],
+      "id": "97a119c1-6cee-4caa-b104-c72ec6a75493",
+      "name": "HTTP Request10"
+    },
+    {
+      "parameters": {
+        "toolDescription": "generator_read_log",
+        "method": "POST",
+        "url": "http://host.docker.internal:3456/tool/generator_read_log",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        1328,
+        384
+      ],
+      "id": "3adfb477-813b-44ba-8ff5-d29ea97d605d",
+      "name": "HTTP Request11"
+    },
+    {
+      "parameters": {
+        "toolDescription": "generator_write_test",
+        "method": "POST",
+        "url": "http://host.docker.internal:3456/tool/generator_write_test",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"fileName\": {{ JSON.stringify($fromAI('fileName', 'Spec file path starting with tests/ and ending with .spec.ts')) }},\n  \"code\": {{ JSON.stringify($fromAI('code', 'Complete Playwright test source code')) }}\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        1472,
+        384
+      ],
+      "id": "b4745eee-4c2f-4727-956d-344c9f89c2f0",
+      "name": "HTTP Request12"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "check-pronto",
+              "leftValue": "={{ $json[\"Roteiro pronto para automação\"] }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "3cad0885-429a-4c64-a015-57c07d58a02f",
+      "name": "Roteiro pronto?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -528,
+        -464
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Monitor QA Spreadsheet": {
+      "main": [
+        [
+          {
+            "node": "Roteiro pronto?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Playwright Generator Prompt": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request1": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request2": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request3": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request4": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request5": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request6": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request7": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request8": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request9": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request10": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request11": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request12": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Roteiro pronto?": {
+      "main": [
+        [
+          {
+            "node": "Build Playwright Generator Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "a3852e3a-404f-4da9-b7e2-5b1c5e0a6609",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "YOUR_INSTANCE_ID"
+  },
+  "nodeGroups": [],
+  "id": "Bxcu6vd2fZyVmRDI",
+  "tags": []
+}

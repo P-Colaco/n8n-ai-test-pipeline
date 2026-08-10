@@ -1,0 +1,14 @@
+# Dependências
+node_modules/
+
+# Ambiente
+.env
+
+# Artefatos de execução local
+.playwright-mcp/
+playwright-report/
+test-results/
+
+
+# Arquivos temporários
+*.log
